@@ -12,6 +12,7 @@
 from .cards import hand_class, pretty_cards, RANK_NAMES, RANK_PLURALS
 from .evaluator import (evaluate, describe_score, PAIR, TWO_PAIR, TRIPS, HIGH_CARD)
 from .ranges import (N_COMBOS, PREFLOP_STRENGTH, CLASS_TOP_PCT, top_range, base_open_fraction,
+                     expected_vpip_pfr, COMBO_SUITED,
                      board_strengths, within_range_percentile, narrow, downweight_top, draw_info,
                      range_grid, range_size, top_classes, range_notation)
 from .equity import OpponentSampler, simulate
@@ -33,6 +34,10 @@ def _pc(x):
     return "%.0f%%" % (100 * x)
 
 
+def _realize(eq):
+    return _clamp(0.64 + 0.72 * eq, 0.72, 1.1)
+
+
 # =================================================================== ranges
 def preflop_order(hand):
     """Seats in preflop acting order."""
@@ -46,8 +51,40 @@ def players_behind_preflop(hand, seat):
     return len(order) - order.index(seat) - 1
 
 
-def open_width(model, players_behind):
-    return _clamp(base_open_fraction(players_behind) * (model["pfr"] / 0.15), 0.03, 0.85)
+def open_width(model, players_behind, n_players=6):
+    """How wide this player opens from a seat with `players_behind` still to act."""
+    standard_pfr = 0.83 * expected_vpip_pfr(n_players)[1]
+    return _clamp(base_open_fraction(players_behind, n_players) * (model["pfr"] / standard_pfr), 0.03, 0.9)
+
+
+def first_raiser(hand):
+    for a in hand.actions:
+        if a["street"] == 0 and a["action"] in ("raise", "bet"):
+            return a["seat"]
+    return None
+
+
+def threebet_range(hand, seat, model):
+    """3-bet range: value hands plus some suited bluffs; wider against late-position opens."""
+    opener = first_raiser(hand)
+    opos = hand.p[opener]["position"] if opener is not None else None
+    f = 1.0
+    if hand.n > 2:
+        if opos in ("CO", "BTN", "SB"):
+            f = 1.5
+        elif opos in ("UTG", "UTG+1", "UTG+2"):
+            f = 0.75
+    width = _clamp(model["threebet"] * f, 0.015, 0.35)
+    val = top_range(width)
+    wide = top_range(min(0.9, width * 2.6))
+    return [v + (wd - v) * (0.35 if su else 0.04) for v, wd, su in zip(val, wide, COMBO_SUITED)]
+
+
+def fold_to_3bet_adjusted(hand, seat, model):
+    """Openers from early position fold less to 3-bets than button / small-blind openers."""
+    ow = open_width(model, players_behind_preflop(hand, seat), hand.n)
+    factor = _clamp((ow / 0.25) ** 0.4, 0.8, 1.0)
+    return _clamp(model["fold_to_3bet"] * factor, 0.1, 0.9)
 
 
 def build_range(hand, seat, model):
@@ -70,7 +107,7 @@ def build_range(hand, seat, model):
         if a["street"] == 0:
             rb = a["raises_before"]
             nb = players_behind_preflop(hand, seat)
-            ow = open_width(model, nb)
+            ow = open_width(model, nb, hand.n)
             vpip, pfr = model["vpip"], model["pfr"]
             if rb == 0:
                 if act in ("raise", "bet"):
@@ -111,13 +148,13 @@ def build_range(hand, seat, model):
                         pct = within_range_percentile(w, PREFLOP_STRENGTH)
                         w = narrow(w, pct, 0.12, floor=0.02)
                     else:
-                        w = [x * y for x, y in zip(w, top_range(_clamp(model["threebet"], 0.015, 0.3)))]
+                        w = [x * y for x, y in zip(w, threebet_range(hand, seat, model))]
                     entered = True
             elif rb == 2:
                 pct = within_range_percentile(w, PREFLOP_STRENGTH)
                 if act == "call":
                     if opened or entered:
-                        w = narrow(w, pct, _clamp(1 - model["fold_to_3bet"], 0.15, 0.85), floor=0.03,
+                        w = narrow(w, pct, _clamp(1 - fold_to_3bet_adjusted(hand, seat, model), 0.15, 0.85), floor=0.03,
                                    top_cut=0.2, top_weight=0.5)
                     else:
                         w = [x * y for x, y in zip(w, top_range(0.045))]
@@ -151,26 +188,45 @@ def build_range(hand, seat, model):
                 keep *= (1.66 / (1.0 + max(b, 0.1))) ** 0.5
                 if river:
                     keep *= 0.8
-                floor = _clamp((0.04 + 0.2 * afq) if river else (0.04 + 0.3 * afq), 0.04, 0.3)
+                if is_cbet:
+                    # frequent c-bettors fire with plenty of air as well
+                    floor = _clamp(0.25 + 0.5 * (model["cbet"] - 0.5), 0.15, 0.6)
+                else:
+                    floor = _clamp((0.04 + 0.2 * afq) if river else (0.04 + 0.3 * afq), 0.04, 0.3)
                 w = narrow(w, pct, _clamp(keep, 0.12, 0.9), floor=floor)
             elif act == "raise":
                 keep = _clamp(0.06 + 0.3 * afq, 0.08, 0.3) * (0.8 if river else 1.0)
                 w = narrow(w, pct, keep, floor=_clamp(0.02 + 0.15 * afq, 0.03, 0.15))
             elif act == "call":
                 bf = a["to_call"] / max(a["pot_before"], 1e-9)
-                keep = continue_postflop(model, bf, a["raises_before"] > 1)
+                keep = continue_postflop(model, bf, a["raises_before"] > 1, river=river)
                 w = narrow(w, dec, keep, floor=0.02)
                 pct2 = within_range_percentile(w, strengths)
                 w = downweight_top(w, pct2, 0.08, _clamp(1 - 1.2 * afq, 0.3, 0.9))
             elif act == "check":
                 checked_to = any(x["street"] == a["street"] and x is not a and x["seat"] != seat
                                  for x in hand.actions[:hand.actions.index(a)])
-                if checked_to:   # checking behind / when checked to: weaker
-                    factor = _clamp(1 - 1.5 * afq, 0.25, 0.85)
-                else:            # first to act: checking to the aggressor is routine
-                    factor = _clamp(1 - 0.5 * afq, 0.6, 0.95)
-                w = downweight_top(w, pct, 0.2, factor)
+                # Checking to the player who has the initiative says little (almost
+                # everyone does it); checking when you had the initiative, or checking
+                # behind, means aggressive players don't have much.
+                initiative = last_aggressor_before(hand, a["street"])
+                if checked_to:
+                    factor = _clamp(0.55 - 1.0 * afq, 0.1, 0.45)
+                elif initiative == seat:
+                    factor = _clamp(0.6 - 0.8 * afq, 0.15, 0.5)
+                else:
+                    factor = _clamp(0.95 - 0.3 * afq, 0.7, 0.92)
+                w = downweight_top(w, pct, 0.3, factor)
     return w
+
+
+def last_aggressor_before(hand, street):
+    """The last player to bet or raise on the previous street (the one with the initiative)."""
+    seat = None
+    for a in hand.actions:
+        if a["street"] == street - 1 and a["action"] in ("bet", "raise"):
+            seat = a["seat"]
+    return seat
 
 
 def hybrid_strength(pct_within, abs_strength):
@@ -179,19 +235,23 @@ def hybrid_strength(pct_within, abs_strength):
     return [0.5 * p + 0.5 * a if a >= 0 else 0.0 for p, a in zip(pct_within, abs_strength)]
 
 
-def continue_postflop(model, bet_frac, is_raise, cbet=False):
+def continue_postflop(model, bet_frac, is_raise, cbet=False, river=False):
     """Probability an opponent continues facing a bet of `bet_frac` x pot."""
     f = model["fold_to_cbet"] if cbet else model["fold_to_bet"]
     if is_raise:
         f = _clamp(f + 0.05, 0.1, 0.92)
-    # stats are observed at ~2/3 pot; bigger bets get fewer calls (but less than 1:1)
-    size = (1.66 / (1.0 + max(bet_frac, 0.05))) ** 0.6
-    return _clamp((1.0 - f) * size, 0.04, 0.97)
+    if river:   # missed draws give up on the river
+        f = _clamp(f + 0.05, 0.1, 0.92)
+    # Stats are observed at ~2/3 pot.  Scale with the bettor's break-even fold rate
+    # b / (1 + b): small bets get far fewer folds, big bets somewhat more.
+    b = max(bet_frac, 0.05)
+    fold = f * ((b / (1.0 + b)) / 0.4) ** 0.8
+    return _clamp(1.0 - fold, 0.04, 0.97)
 
 
 def reraise_share_postflop(model):
     """Share of an opponent's continuing hands that raise instead of calling."""
-    return _clamp(0.12 + 0.35 * model["afq"], 0.1, 0.4)
+    return _clamp(0.06 + 0.25 * model["afq"], 0.06, 0.3)
 
 
 def reraise_share_preflop(hand, seat, model, rr_level, p_cont):
@@ -236,7 +296,7 @@ def continue_preflop(hand, seat, model, new_level, size_ratio=1.0):
             p = _clamp(0.5 * vpip, 0.03, 0.45)
     elif new_level == 2:
         if opened:
-            p = 1.0 - model["fold_to_3bet"]
+            p = 1.0 - fold_to_3bet_adjusted(hand, seat, model)
         elif entered:
             p = _clamp(0.25 + 0.3 * vpip, 0.1, 0.5)
         else:
@@ -376,12 +436,20 @@ class Advisor:
         results = []
         for opt, sc, r in zip(options, scenarios, sim["scenarios"]):
             R = sc["R"]
+            R_rr = sc["R_rr"]
+            if street in (1, 2):
+                # weak hands realise less of their equity (they fold to later bets),
+                # strong hands more (they win extra bets)
+                if R < 1.0:
+                    R *= _realize(r["equity_called"])
+                if R_rr < 1.0:
+                    R_rr *= _realize(r["equity_reraise"])
             add = sc["sim"]["add"]
             ev = r["p_fold"] * pot + R * r["avg_share_pot"] - r["p_called"] * add
             # facing a re-raise hero either folds (losing `add`) or calls
             vs_rr = None
             if r["p_reraise"] > 0:
-                ev_rr_call = sc["R_rr"] * r["avg_rr_share_pot"] - r["p_reraise"] * sc["sim"]["rr_add"]
+                ev_rr_call = R_rr * r["avg_rr_share_pot"] - r["p_reraise"] * sc["sim"]["rr_add"]
                 ev_rr_fold = -r["p_reraise"] * add
                 if ev_rr_call >= ev_rr_fold:
                     ev += ev_rr_call
@@ -476,6 +544,7 @@ class Advisor:
         }
         info["confidence"], info["runner_up"] = self._confidence(results, best, pot)
         info["reasons"] = self._reasons(info, results, best, opps, models, chart)
+        info["summary"], info["kind"] = self._summary(info, results, best, chart)
         return info
 
     # ------------------------------------------------------------ options
@@ -531,7 +600,7 @@ class Advisor:
         if max_to > cur + 1e-9:
             # only offer a shove when stacks are shallow relative to the pot
             if h.street == 0:
-                shove_ok = stack <= 25 * bb or h.raises_this_street >= 2 or stack <= 3 * (pot + to_call)
+                shove_ok = stack <= 25 * bb or h.raises_this_street >= 3 or stack <= 3 * (pot + to_call)
             else:
                 shove_ok = stack <= 2.5 * (pot + to_call)
             if shove_ok or len(opts) <= 2:
@@ -598,7 +667,8 @@ class Advisor:
                         p = continue_preflop(h, s, models[s], h.raises_this_street)
                         rr_share = reraise_share_preflop(h, s, models[s], h.raises_this_street + 1, p)
                     else:
-                        p = continue_postflop(models[s], facing / max(pot + add - facing, 1e-9), False)
+                        p = continue_postflop(models[s], facing / max(pot + add - facing, 1e-9), False,
+                                              river=street == 3)
                         rr_share = reraise_share_postflop(models[s])
                 can_rr = (not hero_allin) and pl["stack"] > facing + 1e-9
                 thr.append(1.0 - p)
@@ -627,7 +697,8 @@ class Advisor:
                 else:
                     is_raise = h.current_bet > 0
                     cbet = street == 1 and h.preflop_aggressor == hero and not is_raise
-                    p = continue_postflop(models[s], facing / max(pot + add - facing, 1e-9), is_raise, cbet)
+                    p = continue_postflop(models[s], facing / max(pot + add - facing, 1e-9), is_raise, cbet,
+                                          river=street == 3)
                     rr_share = reraise_share_postflop(models[s])
                 can_rr = (not hero_allin) and pl["stack"] > facing + 1e-9
                 thr.append(1.0 - p)
@@ -640,6 +711,8 @@ class Advisor:
             rr_add = rr_to - me["street_bet"]
         # equity realisation
         R = self._realization(street, ip, hero_pct, len(opps))
+        if street == 0 and act == "call":
+            R *= 1.0 + self._implied_odds(opps, ip)
         if final_allin:
             R = 1.0
         R_rr = 1.0 if rr_to >= hero_max_to - 1e-9 else R
@@ -647,15 +720,38 @@ class Advisor:
                 "sim": {"thr": thr, "thr_rr": thr_rr, "calls": calls, "rr_calls": rr_calls,
                         "add": add, "rr_add": rr_add, "pot": pot}}
 
+    def _implied_odds(self, opps, ip):
+        """Extra value of calling pre-flop with hands that make disguised big hands
+        (sets, flushes, straights) when stacks are deep."""
+        h = self.h
+        me = h.p[h.hero_seat]
+        eff = min([me["stack"] + me["street_bet"]] + [max(h.p[s]["stack"] + h.p[s]["street_bet"] for s in opps)]) / h.bb_amt
+        if eff < 40:
+            return 0.0
+        c1, c2 = h.hero_cards
+        r1, r2 = c1 >> 2, c2 >> 2
+        suited = (c1 & 3) == (c2 & 3)
+        gap = abs(r1 - r2)
+        if r1 == r2:
+            imp = 0.12
+        elif suited and (gap <= 2 or max(r1, r2) == 12):
+            imp = 0.06
+        elif gap == 1 and min(r1, r2) >= 3:
+            imp = 0.02
+        else:
+            imp = 0.0
+        depth = min(1.0, (eff - 40) / 60.0 + 0.5)
+        return imp * depth * (1.0 if ip else 0.6)
+
     def _realization(self, street, ip, hero_pct, n_opp):
         if street == 3:
             return 1.0
         if street == 0:
-            R = (0.95 if ip else 0.82) * (0.78 + 0.25 * (1.0 - hero_pct))
+            R = (1.0 if ip else 0.82) * (0.78 + 0.25 * (1.0 - hero_pct))
         elif street == 1:
-            R = 0.95 if ip else 0.86
+            R = 0.95 if ip else 0.88
         else:
-            R = 0.97 if ip else 0.9
+            R = 0.97 if ip else 0.91
         if n_opp > 1:
             R *= 0.96
         return min(R, 1.05)
@@ -663,8 +759,23 @@ class Advisor:
     # ----------------------------------------------------------- choosing
     def _choose(self, results, pot):
         # prefer the simpler / lower-variance play when EVs are within a hair
-        eps = max(0.02 * pot, 0.05 * self.h.bb_amt)
+        bb = self.h.bb_amt
+        eps = max(0.02 * pot, 0.05 * bb)
         best = max(results, key=lambda r: r["ev"])
+        passive = [r for r in results if r["action"] in ("check", "call", "fold")]
+        if best["action"] in ("bet", "raise", "allin") and passive:
+            alt = max(passive, key=lambda r: r["ev"])
+            margin = 0.0
+            if self.h.street == 0 and best["equity_called"] < 0.45:
+                # pre-flop bluff re-raises live or die on uncertain fold estimates
+                margin = 0.35 * bb
+            elif self.h.street == 0 and self.h.raises_this_street >= 1:
+                margin = 0.15 * bb
+            elif self.h.street > 0 and self.h.to_call(self.h.hero_seat) > 0:
+                # raising a bet: only when clearly better than calling
+                margin = 0.12 * pot
+            if best["ev"] - alt["ev"] < margin:
+                return alt
         for r in results:
             if r["action"] in ("check", "call", "fold") and r["ev"] >= best["ev"] - eps and r is not best:
                 if r["action"] == "fold" and best["ev"] > 0:
@@ -695,24 +806,32 @@ class Advisor:
         hp = CLASS_TOP_PCT[hand_class(*hole)]
         behind = [s for s in opps if not h.p[s]["acted"]]
         nb = players_behind_preflop(h, hero)
-        base = base_open_fraction(nb)
+        base = base_open_fraction(nb, h.n)
         if behind:
-            tight = sum((1 - models[s]["vpip"]) / (1 - 0.28) for s in behind) / len(behind)
+            ref = 1.1 * expected_vpip_pfr(h.n)[0]      # an average player's VPIP at this table size
+            tight = sum((1 - models[s]["vpip"]) / (1 - ref) for s in behind) / len(behind)
         else:
             tight = 1.0
         adj = _clamp(tight, 0.8, 1.3)
         limpers = sum(1 for a in h.actions if a["street"] == 0 and a["action"] == "call" and a["raises_before"] == 0)
         open_frac = _clamp(base * adj, 0.05, 0.75)
         label = hand_class(*hole)
+        limper_seats = [a["seat"] for a in h.actions
+                        if a["street"] == 0 and a["action"] == "call" and a["raises_before"] == 0]
+        ref_vpip = 1.1 * expected_vpip_pfr(h.n)[0]
+        loose = (sum(models[s]["vpip"] for s in limper_seats if s in models) / max(1, len(limper_seats)) / ref_vpip
+                 if limper_seats else 1.0)
         if to_call <= 0:   # big blind with limpers / completes
-            value_frac = 0.12 if limpers <= 1 else 0.09
+            # raise loose limpers for value with a wider range: they call with worse
+            value_frac = (0.12 if limpers <= 1 else 0.09) * _clamp(loose, 1.0, 1.5)
             action = "raise" if hp <= value_frac else "check"
             text = ("In the big blind facing %s, raise the top %s of hands for value and check the rest. "
                     "%s is in the top %s." % ("%d limper%s" % (limpers, "s" if limpers > 1 else "") if limpers else "a completed small blind",
                                              _pc(value_frac), label, _pc(hp)))
             return {"action": action, "range": value_frac, "hand_pct": hp, "text": text}
         if limpers:
-            iso = open_frac * 0.75
+            # isolate loose limpers with about our normal opening range (tighter with several limpers)
+            iso = open_frac * _clamp(0.8 + 0.3 * (loose - 1.0), 0.75, 1.2) * (1.0 if limpers == 1 else 0.8)
             speculative = (label[0] == label[1]) or label.endswith("s")
             if hp <= iso:
                 action = "raise"
@@ -734,6 +853,49 @@ class Advisor:
                 "top %s of hands%s. %s is in the top %s."
                 % (pos, nb, "s" if nb != 1 else "", _pc(open_frac), extra, label, _pc(hp)))
         return {"action": action, "range": open_frac, "hand_pct": hp, "text": text}
+
+    # ------------------------------------------------------------ summary
+    def _summary(self, info, results, best, chart):
+        """One plain-English sentence + a kind tag (value / bluff / semi-bluff / ...)."""
+        act = best["action"]
+        eq, need = info["equity"], info["pot_odds"]
+        label = best["label"]
+        if chart:
+            hp = chart["hand_pct"]
+            if act in ("raise", "allin"):
+                return ("%s is in the top %s of hands; from here you open the top %s." % (
+                    info["hand_class"], _pc(hp), _pc(chart["range"])), "open")
+            if act == "call":
+                return "A cheap look with a hand that plays well in a multi-way pot.", "limp"
+            if act == "check":
+                return "Take the free flop: your hand isn't strong enough to raise.", "check"
+            return ("%s is outside the top %s of hands worth playing from here." % (
+                info["hand_class"], _pc(chart["range"])), "fold")
+        if act == "fold":
+            if info["to_call"] > 0:
+                return ("You need %s equity to call and have only about %s against their likely hands."
+                        % (_pc(need), _pc(eq)), "fold")
+            return "Fold.", "fold"
+        if act == "call":
+            if eq >= need:
+                return "You need %s equity to call and have about %s: a profitable call." % (_pc(need), _pc(eq)), "call"
+            return ("You have %s against the %s you need, but the hands you can make win big pots later."
+                    % (_pc(eq), _pc(need)), "call")
+        if act == "check":
+            if eq >= 0.6:
+                return ("You're ahead, but betting would mostly fold out the hands you beat. Check and let them bet.",
+                        "trap")
+            return ("Betting wouldn't win often enough: worse hands fold and better hands call. Check.", "check")
+        ec = best["equity_called"]
+        pf = best["p_fold"] or 0.0
+        verb = label.split(" (")[0]
+        if ec >= 0.55:
+            return "%s for value: worse hands will call and you have %s when called." % (verb, _pc(ec)), "value"
+        if ec < 0.35 and pf >= 0.35:
+            return ("%s as a bluff: they should fold about %s of the time, which is enough to profit."
+                    % (verb, _pc(pf)), "bluff")
+        return ("%s as a semi-bluff: they fold about %s of the time and you still have %s when called."
+                % (verb, _pc(pf), _pc(ec)), "semibluff")
 
     # ------------------------------------------------------------ reasons
     def _reasons(self, info, results, best, opps, models, chart):

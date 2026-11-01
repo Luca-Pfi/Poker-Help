@@ -25,6 +25,7 @@ for _label in HAND_ORDER:
     CLASS_TOP_PCT[_label] = _cum / N_COMBOS
 
 PREFLOP_STRENGTH = [CLASS_STRENGTH[c] for c in COMBO_CLASS]
+COMBO_SUITED = [(a & 3) == (b & 3) for (a, b) in ALL_COMBOS]
 
 
 def preflop_percentile(c1, c2):
@@ -55,8 +56,26 @@ def top_range(fraction, softness=0.03):
 BASE_OPEN = {0: 0.0, 1: 0.42, 2: 0.45, 3: 0.28, 4: 0.22, 5: 0.18, 6: 0.155, 7: 0.135, 8: 0.12, 9: 0.11}
 
 
-def base_open_fraction(players_behind):
+def base_open_fraction(players_behind, n_players=6):
+    """Standard open-raise frequency.  Short-handed tables open much wider:
+    heads-up the button is in position and should raise most hands."""
+    if n_players == 2 and players_behind == 1:
+        return 0.80
+    if n_players == 3:
+        if players_behind == 2:
+            return 0.50
+        if players_behind == 1:
+            return 0.45
     return BASE_OPEN.get(players_behind, 0.10)
+
+
+# VPIP / PFR of a solid winning player by number of players dealt in.
+EXPECTED_VPIP_PFR = {2: (0.62, 0.42), 3: (0.42, 0.30), 4: (0.34, 0.24), 5: (0.29, 0.20), 6: (0.26, 0.18),
+                     7: (0.24, 0.16), 8: (0.22, 0.15), 9: (0.21, 0.14), 10: (0.20, 0.13)}
+
+
+def expected_vpip_pfr(n_players):
+    return EXPECTED_VPIP_PFR[max(2, min(10, int(n_players or 6)))]
 
 
 # --------------------------------------------------------------- postflop
@@ -336,7 +355,7 @@ def _runs(labels, inc, plus_label):
 
 
 __all__ = [
-    "PREFLOP_STRENGTH", "CLASS_STRENGTH", "CLASS_TOP_PCT", "top_range", "base_open_fraction",
+    "PREFLOP_STRENGTH", "CLASS_STRENGTH", "CLASS_TOP_PCT", "top_range", "base_open_fraction", "expected_vpip_pfr", "COMBO_SUITED",
     "board_strengths", "within_range_percentile", "narrow", "downweight_top", "draw_info",
     "range_grid", "range_size", "top_classes", "range_notation", "preflop_percentile",
 ]

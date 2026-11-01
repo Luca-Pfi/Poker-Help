@@ -4,23 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Poker Help</title>
-  <meta name="description" content="A Python poker advisor: enter the action at your table and get the mathematically best play at every street, with opponent tracking.">
+  <meta name="description" content="A Python poker advisor: enter the action at your table and get the mathematically best play at every street, with stats on every opponent and on yourself.">
   <meta name="color-scheme" content="dark">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='10' y='6' width='44' height='52' rx='6' fill='%23f4f1e8'/%3E%3Cpath d='M32 18c-6 8-12 12-12 18a6 6 0 0 0 10 4l-3 8h10l-3-8a6 6 0 0 0 10-4c0-6-6-10-12-18z' fill='%23161d1a'/%3E%3C/svg%3E">
+  <meta name="theme-color" content="#0a0f0d">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='4' y='4' width='56' height='56' rx='14' fill='%23eab84c'/%3E%3Cpath d='M32 14c-7 9-14 13-14 20a7 7 0 0 0 11.5 5.3L26 50h12l-3.5-10.7A7 7 0 0 0 46 34c0-7-7-11-14-20z' fill='%231c1507'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css?v=2.0.0">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">♠</span>
-      <span class="brand-name">Poker Help</span>
-      <span class="brand-tag">Python-powered table advisor</span>
-    </div>
-    <nav class="top-actions" id="top-actions"></nav>
-  </header>
+  <header class="topbar" id="topbar"></header>
 
   <main id="app">
     <div class="boot" id="boot">
@@ -28,7 +22,7 @@
         <div class="spinner" aria-hidden="true"></div>
         <h1>Loading the Python engine</h1>
         <p id="boot-text">Starting…</p>
-        <p class="muted small">The bot is written in Python and runs in your browser with Pyodide. The first visit downloads ~10&nbsp;MB, which is cached after that.</p>
+        <p class="muted small">The bot is written in Python and runs in your browser with Pyodide. The first visit downloads about 10&nbsp;MB, which is cached after that.</p>
       </div>
     </div>
   </main>
@@ -36,6 +30,6 @@
   <div class="modal-root" id="modal-root"></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script src="assets/app.js"></script>
+  <script src="assets/app.js?v=2.0.0"></script>
 </body>
 </html>

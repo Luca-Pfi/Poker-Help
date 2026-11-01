@@ -3,12 +3,13 @@ Bayesian-shrunk estimates used by the advisor, and player-type profiles."""
 
 from .cards import pretty_cards, hand_class
 from .evaluator import evaluate, describe_score
+from .ranges import expected_vpip_pfr
 
 # Population priors (typical low-stakes / live cash game) and their weight
 # in pseudo-observations: est = (count + prior * k) / (opportunities + k)
 PRIORS = {
-    "vpip": (0.28, 12),
-    "pfr": (0.14, 12),
+    "vpip": (0.28, 8),      # vpip / pfr / 3-bet priors are rescaled for the table size
+    "pfr": (0.14, 8),
     "threebet": (0.06, 10),
     "fold_to_3bet": (0.50, 6),
     "limp": (0.10, 10),
@@ -50,8 +51,9 @@ def describe_line(actions):
 
 
 class Tracker:
-    def __init__(self, data=None):
+    def __init__(self, data=None, table_size=6):
         self.stats = {}
+        self.table_size = table_size
         if data:
             for pid, st in data.items():
                 base = new_stats(st.get("name", pid))
@@ -160,6 +162,13 @@ class Tracker:
         """Shrunk estimate of a frequency stat."""
         st = self.stats.get(pid) or new_stats(pid)
         prior, k = PRIORS[stat]
+        ev, ep = expected_vpip_pfr(self.table_size)
+        if stat == "vpip":
+            prior = 1.1 * ev           # the average player is a bit looser than a solid one
+        elif stat == "pfr":
+            prior = 0.8 * ep
+        elif stat == "threebet":
+            prior = 0.06 * (1 + max(0, 6 - self.table_size) * 0.12)
         if stat == "fold_to_cbet":
             # few c-bet samples: lean on how often this player folds to bets in general
             prior = self.estimate(pid, "fold_to_bet")
@@ -227,21 +236,23 @@ class Tracker:
         ratio = pfr / vpip if vpip > 0 else 0
         aggressive = ratio >= 0.5 and afq >= 0.33
         passive = ratio < 0.35 or afq < 0.28
+        # looseness relative to a solid player at this table size (heads-up everyone plays more hands)
+        vrel = vpip / expected_vpip_pfr(self.table_size)[0]
         if n < 6:
             key, label = "unknown", "Unknown"
-        elif vpip < 0.14:
+        elif vrel < 0.55:
             key, label = "nit", "Nit"
-        elif vpip > 0.45 and aggressive:
+        elif aggressive and (vrel > 1.75 or (vrel > 0.85 and afq >= 0.55)):
             key, label = "maniac", "Maniac"
-        elif vpip > 0.32 and passive and ftb < 0.42:
+        elif passive and ((vrel > 1.23 and ftb < 0.42) or (vrel > 0.7 and ftb < 0.3)):
             key, label = "station", "Calling station"
-        elif vpip > 0.32 and aggressive:
+        elif vrel > 1.23 and aggressive:
             key, label = "lag", "Loose-aggressive (LAG)"
-        elif vpip > 0.32:
+        elif vrel > 1.23:
             key, label = "loose_passive", "Loose-passive"
-        elif vpip <= 0.24 and passive:
+        elif vrel <= 0.92 and passive:
             key, label = "rock", "Tight-passive (Rock)"
-        elif vpip <= 0.24:
+        elif vrel <= 0.92:
             key, label = "tag", "Tight-aggressive (TAG)"
         elif aggressive:
             key, label = "reg", "Regular (aggressive)"
@@ -282,3 +293,35 @@ class Tracker:
             "note": self.exploit_notes(pid),
             "shown": st.get("shown", []),
         }
+
+
+def benchmarks(table_size):
+    """Typical ranges for a solid winning player at this table size, with coaching tips."""
+    ev, ep = expected_vpip_pfr(table_size)
+    short = table_size <= 3
+    return [
+        {"key": "vpip", "label": "VPIP", "lo": round(ev * 0.85, 3), "hi": round(ev * 1.15, 3), "min_n": 20,
+         "low": "You play very few hands: open up a little, especially on the button and cutoff.",
+         "high": "You play too many hands: fold more weak offsuit hands, especially out of position."},
+        {"key": "pfr", "label": "PFR", "lo": round(ep * 0.85, 3), "hi": round(ep * 1.2, 3), "min_n": 20,
+         "low": "You call more than you raise: when a hand is worth playing, raising usually beats limping or calling.",
+         "high": "You raise very often: make sure your raises still have enough strong hands in them."},
+        {"key": "threebet", "label": "3-bet", "lo": 0.10 if short else 0.06, "hi": 0.18 if short else 0.11, "min_n": 15,
+         "low": "You rarely re-raise: 3-bet your strongest hands (and a few suited bluffs) instead of just calling.",
+         "high": "You 3-bet a lot: good players will start 4-betting you light."},
+        {"key": "af", "label": "Aggression factor", "lo": 1.8, "hi": 3.5, "min_n": 15,
+         "low": "Post-flop you call much more than you bet: bet your strong hands and good draws.",
+         "high": "Very aggressive post-flop: make sure you are not bluffing calling stations."},
+        {"key": "cbet", "label": "C-bet", "lo": 0.5, "hi": 0.72, "min_n": 10,
+         "low": "You often give up after raising pre-flop: c-bet more on boards that favour you.",
+         "high": "You c-bet almost every flop: check back some weak hands on bad boards."},
+        {"key": "fold_to_bet", "label": "Fold to bet", "lo": 0.35, "hi": 0.55, "min_n": 15,
+         "low": "You rarely fold to bets: let go of weak pairs against strong lines.",
+         "high": "You fold to bets often: opponents can profit by bluffing you."},
+        {"key": "wtsd", "label": "Went to showdown", "lo": 0.24, "hi": 0.33, "min_n": 15,
+         "low": "You rarely reach showdown: you may be folding too often on later streets.",
+         "high": "You go to showdown a lot: you may be calling down too light."},
+        {"key": "wsd", "label": "Won at showdown", "lo": 0.48, "hi": 0.6, "min_n": 10,
+         "low": "You lose many showdowns: tighten up your river calls.",
+         "high": "You win most showdowns: you could call (or bluff-catch) a little more."},
+    ]

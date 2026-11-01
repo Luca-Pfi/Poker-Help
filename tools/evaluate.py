@@ -134,7 +134,7 @@ def run_match(args):
         for st in s.seats:
             s.update_seat(st["seat"], stack=100)
         if hero_kind == "advisor_nomem":
-            s.tracker = Tracker()
+            s.tracker = Tracker(table_size=n)
         deck = list(range(52))
         card_rng.shuffle(deck)
         holes = {i: deck[2 * i:2 * i + 2] for i in range(n)}
@@ -309,7 +309,7 @@ def facing_open(hero_pos, opener_pos, n=6, opp_stats=None, restrict=None):
                 s.act(seat, "raise", 2.5)
             else:
                 s.act(seat, "fold")
-        a = Advisor(h, s.tracker, time_budget=0.02, max_iters=1200).advise()
+        a = Advisor(h, s.tracker, time_budget=0.08, max_iters=5000).advise()
         res.append((lab, a["recommendation"]["action"]))
     return weighted(res), res
 
@@ -345,7 +345,7 @@ def facing_3bet(hero_pos, threebettor_pos, n=6, opp_stats=None, villain_stats=No
                 s.act(seat, "raise", 8.5)
             else:
                 s.act(seat, "fold")
-        a = Advisor(h, s.tracker, time_budget=0.02, max_iters=1200).advise()
+        a = Advisor(h, s.tracker, time_budget=0.08, max_iters=5000).advise()
         res.append((lab, a["recommendation"]["action"]))
     return weighted(res), len(opens)
 
@@ -383,7 +383,7 @@ def flop_spots(role, n_samples, opp_stats=None, hero_classes=None, villain_bet=N
         else:
             s.act(0, "check")
             s.act(h.to_act, "bet", round(h.pot() * villain_bet, 2))
-        a = Advisor(h, s.tracker, time_budget=0.02, max_iters=1200).advise()
+        a = Advisor(h, s.tracker, time_budget=0.08, max_iters=5000).advise()
         acts.append(a["recommendation"]["action"])
     tot = len(acts)
     return {k: round(acts.count(k) / tot, 3) for k in sorted(set(acts))}
@@ -478,6 +478,8 @@ def main():
     # frequency tests (default population priors)
     t1 = time.time()
     report["rfi_6max"] = rfi_ranges(6)
+    report["rfi_hu"] = rfi_ranges(2)
+    report["hu_bb_vs_btn"] = facing_open("BB", "BTN", n=2)[0]
     report["bb_vs_btn"] = facing_open("BB", "BTN")[0]
     report["btn_vs_utg"] = facing_open("BTN", "UTG")[0]
     report["sb_vs_btn"] = facing_open("SB", "BTN")[0]

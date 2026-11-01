@@ -58,7 +58,7 @@ def _m_start_hand(a):
 
 
 def _m_act(a):
-    _need().act(a["seat"], a["action"], a.get("amount"))
+    _need().act(a["seat"], a["action"], a.get("amount"), a.get("advised"))
     return {"state": _state()}
 
 
